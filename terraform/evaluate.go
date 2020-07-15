@@ -2,6 +2,7 @@ package terraform
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -644,6 +645,36 @@ func (d *evaluationStateData) GetResource(addr addrs.Resource, rng tfdiags.Sourc
 	}
 	ty := schema.ImpliedType()
 
+	// See if this entire resource is being destroyed which can change how we
+	// evaluate it.
+	//
+	// We have a problem where during a full destroy all instances
+	// will have a Delete change planned, but we may need to evaluate some
+	// resources for providers that reference them to work correctly.
+	//
+	// If all instances are being removed, there are only 2 possible cases,
+	// either this is a full destroy and a provider is referencing this,
+	// directly or through temporary values; or this is an invalid reference
+	// and the error should have been caught elsewhere.
+	//
+	// If we are destroying the entire resource, then we allow the evaluation
+	// of the instances being destroyed, since the end usage should be limited
+	// as noted above. We record the changes here only so we don't need to look
+	// them up again in the next loop.
+	fullDestroy := true
+	changes := map[addrs.InstanceKey]*plans.ResourceInstanceChangeSrc{}
+	for key := range rs.Instances {
+		instAddr := addr.Instance(key).Absolute(d.ModulePath)
+		change := d.Evaluator.Changes.GetResourceInstanceChange(instAddr, states.CurrentGen)
+		changes[key] = change
+		if change != nil {
+			if change.Action != plans.Delete && fullDestroy {
+				fullDestroy = false
+			}
+		}
+
+	}
+
 	// Decode all instances in the current state
 	instances := map[addrs.InstanceKey]cty.Value{}
 	for key, is := range rs.Instances {
@@ -652,22 +683,24 @@ func (d *evaluationStateData) GetResource(addr addrs.Resource, rng tfdiags.Sourc
 			instances[key] = cty.UnknownVal(ty)
 			continue
 		}
-
 		instAddr := addr.Instance(key).Absolute(d.ModulePath)
 
-		change := d.Evaluator.Changes.GetResourceInstanceChange(instAddr, states.CurrentGen)
+		change := changes[key]
 		if change != nil {
 			// Don't take any resources that are yet to be deleted into account.
 			// If the referenced resource is CreateBeforeDestroy, then orphaned
 			// instances will be in the state, as they are not destroyed until
 			// after their dependants are updated.
 			if change.Action == plans.Delete {
-				continue
+				if !fullDestroy {
+					continue
+				}
+				log.Printf("[WARN] evaluating %s, which is planned to be deleted", instAddr)
 			}
 		}
 
 		// Planned resources are temporarily stored in state with empty values,
-		// and need to be replaced bu the planned value here.
+		// and need to be replaced by the planned value here.
 		if is.Current.Status == states.ObjectPlanned {
 			if change == nil {
 				// If the object is in planned status then we should not get
