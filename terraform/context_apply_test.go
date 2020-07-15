@@ -11450,3 +11450,141 @@ output "out" {
 		t.Fatalf(`expected output "new", got: %q`, out)
 	}
 }
+
+// Ensure that we can destroy when a provider references a resource that will
+// also be destroyed
+func TestContext2Apply_destroyProviderReference(t *testing.T) {
+	m := testModuleInline(t, map[string]string{
+		"main.tf": `
+provider "null" {
+  value = ""
+}
+
+data "null_data_source" "foo" {
+}
+
+provider "test" {
+  value = data.null_data_source.foo.output
+}
+
+resource "test_instance" "bar" {
+}
+`})
+
+	schemaFn := func(name string) *ProviderSchema {
+		return &ProviderSchema{
+			Provider: &configschema.Block{
+				Attributes: map[string]*configschema.Attribute{
+					"value": {
+						Type:     cty.String,
+						Required: true,
+					},
+				},
+			},
+			ResourceTypes: map[string]*configschema.Block{
+				name + "_instance": {
+					Attributes: map[string]*configschema.Attribute{
+						"id": {
+							Type:     cty.String,
+							Computed: true,
+						},
+						"foo": {
+							Type:     cty.String,
+							Optional: true,
+						},
+					},
+				},
+			},
+			DataSources: map[string]*configschema.Block{
+				name + "_data_source": {
+					Attributes: map[string]*configschema.Attribute{
+						"id": {
+							Type:     cty.String,
+							Computed: true,
+						},
+						"output": {
+							Type:     cty.String,
+							Computed: true,
+						},
+					},
+				},
+			},
+		}
+	}
+
+	testP := new(MockProvider)
+	testP.ReadResourceFn = func(req providers.ReadResourceRequest) providers.ReadResourceResponse {
+		return providers.ReadResourceResponse{NewState: req.PriorState}
+	}
+	testP.GetSchemaReturn = schemaFn("test")
+
+	providerConfig := ""
+	testP.ConfigureNewFn = func(req providers.ConfigureRequest) (resp providers.ConfigureResponse) {
+		value := req.Config.GetAttr("value")
+		if value.IsKnown() && !value.IsNull() {
+			providerConfig = value.AsString()
+		} else {
+			providerConfig = ""
+		}
+		return resp
+	}
+	testP.ApplyFn = func(info *InstanceInfo, s *InstanceState, d *InstanceDiff) (*InstanceState, error) {
+		if providerConfig != "valid" {
+			return nil, fmt.Errorf("provider config is %q", providerConfig)
+		}
+		return testApplyFn(info, s, d)
+	}
+	testP.DiffFn = testDiffFn
+
+	nullP := new(MockProvider)
+	nullP.ReadResourceFn = func(req providers.ReadResourceRequest) providers.ReadResourceResponse {
+		return providers.ReadResourceResponse{NewState: req.PriorState}
+	}
+	nullP.GetSchemaReturn = schemaFn("null")
+
+	nullP.ApplyFn = testApplyFn
+	nullP.DiffFn = testDiffFn
+
+	nullP.ReadDataSourceResponse = providers.ReadDataSourceResponse{
+		State: cty.ObjectVal(map[string]cty.Value{
+			"id":     cty.StringVal("ID"),
+			"output": cty.StringVal("valid"),
+		}),
+	}
+
+	ctx := testContext2(t, &ContextOpts{
+		Config: m,
+		Providers: map[addrs.Provider]providers.Factory{
+			addrs.NewDefaultProvider("test"): testProviderFuncFixed(testP),
+			addrs.NewDefaultProvider("null"): testProviderFuncFixed(nullP),
+		},
+	})
+
+	if _, diags := ctx.Plan(); diags.HasErrors() {
+		t.Fatalf("plan errors: %s", diags.Err())
+	}
+
+	state, diags := ctx.Apply()
+	if diags.HasErrors() {
+		t.Fatalf("apply errors: %s", diags.Err())
+	}
+
+	ctx = testContext2(t, &ContextOpts{
+		Config: m,
+		Providers: map[addrs.Provider]providers.Factory{
+			addrs.NewDefaultProvider("test"): testProviderFuncFixed(testP),
+			addrs.NewDefaultProvider("null"): testProviderFuncFixed(nullP),
+		},
+
+		State:   state,
+		Destroy: true,
+	})
+
+	if _, diags := ctx.Plan(); diags.HasErrors() {
+		t.Fatalf("destroy plan errors: %s", diags.Err())
+	}
+
+	if _, diags := ctx.Apply(); diags.HasErrors() {
+		t.Fatalf("destroy apply errors: %s", diags.Err())
+	}
+}
