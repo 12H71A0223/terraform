@@ -210,11 +210,6 @@ func (t AttachDependenciesTransformer) Transform(g *Graph) error {
 		}
 		selfAddr := attacher.ResourceAddr()
 
-		// Data sources don't need to track destroy dependencies
-		if selfAddr.Resource.Mode == addrs.DataResourceMode {
-			continue
-		}
-
 		ans, err := g.Ancestors(v)
 		if err != nil {
 			return err
@@ -233,11 +228,6 @@ func (t AttachDependenciesTransformer) Transform(g *Graph) error {
 			case GraphNodeConfigResource:
 				addr = d.ResourceAddr()
 			default:
-				continue
-			}
-
-			// Data sources don't need to track destroy dependencies
-			if addr.Resource.Mode == addrs.DataResourceMode {
 				continue
 			}
 
