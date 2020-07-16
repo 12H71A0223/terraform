@@ -11460,14 +11460,25 @@ provider "null" {
   value = ""
 }
 
-data "null_data_source" "foo" {
+module "mod" {
+  source = "./mod"
 }
 
 provider "test" {
-  value = data.null_data_source.foo.output
+  value = module.mod.output
 }
 
 resource "test_instance" "bar" {
+}
+`,
+		"mod/main.tf": `
+data "null_data_source" "foo" {
+       count = 1
+}
+
+
+output "output" {
+  value = data.null_data_source.foo[0].output
 }
 `})
 
