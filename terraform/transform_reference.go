@@ -113,6 +113,7 @@ func (t *ReferenceTransformer) Transform(g *Graph) error {
 			// use their own state.
 			continue
 		}
+
 		parents := m.References(v)
 		parentsDbg := make([]string, len(parents))
 		for i, v := range parents {
@@ -472,6 +473,12 @@ func NewReferenceMap(vs []dag.Vertex) ReferenceMap {
 		// We're only looking for referenceable nodes
 		rn, ok := v.(GraphNodeReferenceable)
 		if !ok {
+			continue
+		}
+
+		// You can't reference a destroy node directly, actual dependencies for
+		// these will be attached later on.
+		if _, ok := v.(GraphNodeDestroyer); ok {
 			continue
 		}
 
